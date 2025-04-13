@@ -143,7 +143,114 @@ void list_treasures(const char *hunt_id)
     }
     close(fd);
 }
+void view_treasures(char *hunt_id, int id)
+{
+    char path[256];
+    sprintf(path, "%s/%s", hunt_id, TREASURE_FILE);
 
+    int fd = open(path, O_RDONLY);
+    if (fd < 0)
+    {
+        perror("open");
+        exit(-1);
+    }
+    Treasure tr;
+    int ok = 1;
+    while ((read(fd, &tr, sizeof(Treasure))) > 0 && ok == 1)
+    {
+        if (tr.id == id)
+        {
+            printf("id: %d | user: %s | lat: %.2f | long: %.2f | value: %d\n", tr.id, tr.username, tr.lat, tr.longi, tr.value);
+            ok = 0;
+        }
+    }
+}
+void remove_treasure(char *hunt_id, int id)
+{
+    char path[256];
+    sprintf(path, "%s/%s", hunt_id, TREASURE_FILE);
+
+    int fd = open(path, O_RDONLY);
+    if (fd < 0)
+    {
+        perror("open");
+        exit(-1);
+    }
+
+    char temp_path[256];
+    sprintf(temp_path, "%s/temp.dat", hunt_id);
+
+    int temp_fd = open(temp_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (temp_fd < 0)
+    {
+        perror("open");
+        exit(-1);
+    }
+
+    Treasure t;
+    int ok = 0;
+    while (read(fd, &t, sizeof(Treasure)) == sizeof(Treasure))
+    {
+        if (t.id == id)
+        {
+            ok = 1;
+            continue;
+        }
+        write(temp_fd, &t, sizeof(Treasure));
+    }
+
+    close(fd);
+    close(temp_fd);
+
+    if (ok)
+    {
+        if (rename(temp_path, path) != 0)
+        {
+            perror("rename");
+        }
+        log_action(hunt_id, "REMOVE", id);
+    }
+    else
+    {
+        printf("treasure ID %d not found\n", id);
+        unlink(temp_path);
+    }
+}
+void remove_hunt(char *hunt_id)
+{
+    DIR *dir = opendir(hunt_id);
+    if (!dir)
+    {
+        perror("opendir");
+        exit(-1);
+    }
+
+    struct dirent *d;
+    char file[512];
+
+    while ((d = readdir(dir)) != NULL)
+    {
+        if (strcmp(d->d_name, ".") == 0 || strcmp(d->d_name, "..") == 0)
+            continue;
+
+        sprintf(file, "%s/%s", hunt_id, d->d_name);
+        if (unlink(file) != 0)
+        {
+            perror("unlink");
+        }
+    }
+
+    closedir(dir);
+
+    if (rmdir(hunt_id) != 0)
+    {
+        perror("rmdir");
+    }
+
+    char symlink_name[256];
+    sprintf(symlink_name, "logged_hunt-%s", hunt_id);
+    unlink(symlink_name);
+}
 int main(int argc, char *argv[])
 {
     if (argc < 3)
@@ -159,6 +266,20 @@ int main(int argc, char *argv[])
     else if (strcmp(argv[1], "--list") == 0)
     {
         list_treasures(argv[2]);
+    }
+    else if (strcmp(argv[1], "--view") == 0)
+    {
+        int id = atoi(argv[3]);
+        view_treasures(argv[2], id);
+    }
+    else if (strcmp(argv[1], "--remove_treasure") == 0)
+    {
+        int id = atoi(argv[3]);
+        remove_treasure(argv[2], id);
+    }
+    else if (strcmp(argv[1], "--remove_hunt") == 0)
+    {
+        remove_hunt(argv[2]);
     }
     else
     {
