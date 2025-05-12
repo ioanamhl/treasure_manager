@@ -3,12 +3,12 @@
 #include <string.h>
 #include <fcntl.h>
 #include <unistd.h>
-#include <signal.h>
-#include <sys/wait.h>
-#include <time.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <dirent.h>
+#include <signal.h>
+#include <sys/wait.h>
+#include <time.h>
 
 #define CMD_FILE "monitor.txt"
 #define TREASURE_FILE "treasures.dat"
@@ -26,8 +26,6 @@ typedef struct
 pid_t pid = -1;
 int running;
 
-//
-
 void handle_command()
 {
     int fd = open(CMD_FILE, O_RDONLY);
@@ -37,9 +35,11 @@ void handle_command()
         exit(-1);
     }
 
-    char cmd[256], arg1[256];
-    read(cmd, 256, fd);
+    char cmd[256];
+    read(fd, cmd, 256);
     close(fd);
+
+    char *command = strtok(cmd, " \n");
 
     if (strcmp(cmd, "list_hunts") == 0)
     {
@@ -47,32 +47,46 @@ void handle_command()
         struct dirent *d;
         while ((d = readdir(dir)) != NULL)
         {
-            if (strcmp(d->d_name, ".") != 0 && strcmp(d->d_name, "..") != 0)
+            if (strcmp(d->d_name, ".") == 0 || strcmp(d->d_name, "..") == 0)
                 continue;
-            if (d->d_type == DT_DIR)
+            struct stat sb;
+
+            if (lstat(d->d_name, &sb) == -1)
+            {
+                perror("lstat");
+                exit(EXIT_FAILURE);
+            }
+
+            if (S_ISDIR(sb.st_mode))
             {
                 char path[512];
                 sprintf(path, "%s/%s", d->d_name, TREASURE_FILE);
                 int count = 0;
                 int fd1 = open(path, O_RDONLY);
-                if (fd1 >= 0)
+                if (fd1 < 0)
                 {
-                    Treasure t;
-                    while (read(fd1, &t, sizeof(Treasure)) == sizeof(Treasure))
-                    {
-                        count++;
-                    }
-                    close(fd);
+                    perror("open");
+                    exit(-1);
                 }
+
+                Treasure t;
+                while (read(fd1, &t, sizeof(Treasure)) == sizeof(Treasure))
+                {
+                    count++;
+                }
+                close(fd1);
+
                 printf("Hunt: %s, Treasures: %d\n", d->d_name, count);
             }
         }
-        closedir(d);
+        closedir(dir);
+        printf("hub> ");
+        fflush(stdout);
     }
-    else if (strncmp(cmd, "list_treasures", 14) == 0)
+    else if (strcmp(command, "list_treasures") == 0)
     {
-        char *p = strtok(cmd, " ");
-        strcpy(arg1, cmd);
+        char *arg1 = strtok(NULL, " \n");
+
         char path[512];
         sprintf(path, "%s/%s", arg1, TREASURE_FILE);
         int fd2 = open(path, O_RDONLY);
@@ -84,19 +98,21 @@ void handle_command()
         Treasure t;
         while (read(fd2, &t, sizeof(Treasure)) == sizeof(Treasure))
         {
-            printf("id: %d | user: %s | lat: %.2f | long: %.2f | value: %d\n", t.id, t.username, t.lat, t.longi, t.value);
+            printf("id: %d | user: %s \n", t.id, t.username);
         }
         close(fd2);
+        printf("hub> ");
+        fflush(stdout);
     }
-    else if (strncmp(cmd, "view_treasure", 14) == 0)
+    else if (strcmp(command, "view_treasure") == 0)
     {
-        char *p = strtok(cmd, " ");
-        *p = strtok(cmd, " ");
-        strcpy(arg1, p);
-        int id = atoi(cmd);
+        char *hunt = strtok(NULL, " \n");
+        char *id_string = strtok(NULL, " \n");
+
+        int id = atoi(id_string);
 
         char path[1024];
-        sprintf(path, "%s/%s", arg1, TREASURE_FILE);
+        sprintf(path, "%s/%s", hunt, TREASURE_FILE);
         int fd3 = open(path, O_RDONLY);
         if (fd3 < 0)
         {
@@ -113,6 +129,8 @@ void handle_command()
             }
         }
         close(fd3);
+        printf("hub> ");
+        fflush(stdout);
     }
 }
 
@@ -124,7 +142,7 @@ void sigusr1_handler(int sig)
 void sigterm_handler(int sig)
 {
     printf("monitor is stopping\n");
-    sleep(1);
+    usleep(100000);
     exit(0);
 }
 
@@ -137,15 +155,15 @@ void sigchld_handler(int sig)
 
 void write_to_file(const char *cmd)
 {
-    int fd = open(CMD_FILE, O_RDONLY);
+    int fd = open(CMD_FILE, O_WRONLY | O_TRUNC | O_CREAT, 0644);
     if (fd < 0)
     {
         perror("open");
         exit(-1);
     }
     char command[256];
-    sprintf(command,"%s\n",cmd);
-    write(fd, sizeof(command), command);
+    sprintf(command, "%s\n", cmd);
+    write(fd, command, strlen(command));
     close(fd);
     kill(pid, SIGUSR1);
 }
