@@ -26,6 +26,8 @@ typedef struct
 pid_t pid = -1;
 int running;
 
+int pfd[2];
+int cmd_pipe[2];
 void handle_command()
 {
     int fd = open(CMD_FILE, O_RDONLY);
@@ -40,8 +42,11 @@ void handle_command()
     close(fd);
 
     char *command = strtok(cmd, " \n");
-
-    if (strcmp(cmd, "list_hunts") == 0)
+    if (!command)
+    {
+        return;
+    }
+    if (strcmp(command, "list_hunts") == 0)
     {
         DIR *dir = opendir(".");
         struct dirent *d;
@@ -75,13 +80,12 @@ void handle_command()
                     count++;
                 }
                 close(fd1);
-
-                printf("Hunt: %s, Treasures: %d\n", d->d_name, count);
+                char output[1024];
+                sprintf(output, "Hunt: %s, Treasures: %d\n", d->d_name, count);
+                write(pfd[1], output, strlen(output));
             }
         }
         closedir(dir);
-        printf("hub> ");
-        fflush(stdout);
     }
     else if (strcmp(command, "list_treasures") == 0)
     {
@@ -98,11 +102,11 @@ void handle_command()
         Treasure t;
         while (read(fd2, &t, sizeof(Treasure)) == sizeof(Treasure))
         {
-            printf("id: %d | user: %s \n", t.id, t.username);
+            char output[1024];
+            sprintf(output, "id: %d | user: %s \n", t.id, t.username);
+            write(pfd[1], output, strlen(output));
         }
         close(fd2);
-        printf("hub> ");
-        fflush(stdout);
     }
     else if (strcmp(command, "view_treasure") == 0)
     {
@@ -124,68 +128,174 @@ void handle_command()
         {
             if (t.id == id)
             {
-                printf("id: %d | user: %s | lat: %.2f | long: %.2f | value: %d\n", t.id, t.username, t.lat, t.longi, t.value);
+                char output[1024];
+                sprintf(output, "id: %d | user: %s | lat: %.2f | long: %.2f | value: %d\n", t.id, t.username, t.lat, t.longi, t.value);
+                write(pfd[1], output, strlen(output));
                 break;
             }
         }
         close(fd3);
-        printf("hub> ");
-        fflush(stdout);
+    }
+    else if (strcmp(command, "calculate_score") == 0)
+    {
+        DIR *dir = opendir(".");
+        if (!dir)
+        {
+            perror("opendir");
+            return;
+        }
+        struct dirent *d;
+        while ((d = readdir(dir)) != NULL)
+        {
+            if (strcmp(d->d_name, ".") == 0 || strcmp(d->d_name, "..") == 0)
+                continue;
+            struct stat sb;
+            if (stat(d->d_name, &sb) == -1 || !S_ISDIR(sb.st_mode))
+                continue;
+            char path[512];
+            sprintf(path, "%s/%s", d->d_name, TREASURE_FILE);
+            int pfd2[2];
+            if (pipe(pfd2) < 0)
+            {
+                perror("pipe");
+                exit(-1);
+            }
+            pid_t pid2 = fork();
+            if (pid2 < 0)
+            {
+                perror("fork");
+                exit(-1);
+            }
+            if (pid2 == 0)
+            {
+                close(pfd2[0]);
+                dup2(pfd2[1], 1);
+                close(pfd2[1]);
+
+                execl("./score", "score", path, NULL);
+                perror("execl");
+                exit(EXIT_FAILURE);
+            }
+            else
+            {
+                close(pfd2[1]);
+                char buffer[1024];
+                ssize_t r;
+                while ((r = read(pfd2[0], buffer, sizeof(buffer) - 1)) > 0)
+                {
+                    buffer[r] = '\0';
+                    char output[2048];
+                    snprintf(output, sizeof(output), "hunt %s:\n%s", d->d_name, buffer);
+                    write(pfd[1], output, strlen(output));
+                }
+                close(pfd2[0]);
+                waitpid(pid2, NULL, 0);
+            }
+        }
+
+        closedir(dir);
     }
 }
 
 void sigusr1_handler(int sig)
 {
     handle_command();
+    close(pfd[1]);
+    exit(0);
 }
 
 void sigterm_handler(int sig)
 {
     printf("monitor is stopping\n");
-    usleep(100000);
     exit(0);
 }
-
 void sigchld_handler(int sig)
 {
-    wait(NULL);
-    running = 0;
-    printf("monitor terminated\n");
+    int status;
+    pid_t child_pid;
+    while ((child_pid = waitpid(-1, &status, WNOHANG)) > 0)
+    {
+        if (child_pid == pid)
+        {
+            running = 0;
+        }
+    }
 }
-
 void write_to_file(const char *cmd)
 {
+
+    if (pipe(pfd) < 0) {
+        perror("pipe");
+        exit(-1);
+    }
     int fd = open(CMD_FILE, O_WRONLY | O_TRUNC | O_CREAT, 0644);
     if (fd < 0)
     {
         perror("open");
         exit(-1);
     }
-    char command[256];
-    sprintf(command, "%s\n", cmd);
-    write(fd, command, strlen(command));
+    write(fd, cmd, strlen(cmd));
     close(fd);
-    kill(pid, SIGUSR1);
-}
 
+    if (!running)
+    {
+        pid = fork();
+        if (pid < 0)
+        {
+            perror("fork");
+            return;
+        }
+        else if (pid == 0)
+        {
+            struct sigaction sa;
+            sa.sa_handler = sigusr1_handler;
+            sa.sa_flags = 0;
+            sigaction(SIGUSR1, &sa, NULL);
+
+            struct sigaction sa_term;
+            sa_term.sa_handler = sigterm_handler;
+            sa_term.sa_flags = 0;
+            sigaction(SIGTERM, &sa_term, NULL);
+
+            pause();
+            exit(0);
+        }
+        else
+        {
+            running = 1;
+            usleep(10000);
+        }
+    }
+
+    kill(pid, SIGUSR1);
+
+    close(pfd[1]);
+    char buff[1024];
+    ssize_t n;
+    while ((n = read(pfd[0], buff, sizeof(buff) - 1)) > 0)
+    {
+        buff[n] = '\0';
+        printf("%s", buff);
+    }
+    close(pfd[0]);
+}
 int main()
 {
-    char input[128];
 
-    struct sigaction sa;
-    memset(&sa, 0, sizeof(struct sigaction));
-    sa.sa_handler = sigchld_handler;
-    sa.sa_flags = 0;
-    sigaction(SIGCHLD, &sa, NULL);
+    struct sigaction sig;
+    memset(&sig, 0, sizeof(struct sigaction));
+    sig.sa_handler = sigchld_handler;
+    sig.sa_flags = SA_NOCLDSTOP | SA_RESTART;
+    sigaction(SIGCHLD, &sig, NULL);
 
     while (1)
     {
         printf("hub> ");
         fflush(stdout);
-
-        if (fgets(input, sizeof(input), stdin) == NULL)
+        char input[128];
+        if (!fgets(input, sizeof(input), stdin))
             break;
-        input[strcspn(input, "\n")] = 0;
+        input[strcspn(input, "\n")] = '\0';
 
         if (strcmp(input, "start_monitor") == 0)
         {
@@ -194,39 +304,48 @@ int main()
                 printf("monitor already running\n");
                 continue;
             }
-            pid = fork();
-            if (pid < 0)
-            {
-                perror("fork");
-                exit(-1);
-            }
-            else if (pid == 0)
-            {
-                struct sigaction sig;
-                memset(&sig, 0, sizeof(struct sigaction));
-                sig.sa_handler = sigusr1_handler;
-                sig.sa_flags = 0;
-                sigaction(SIGUSR1, &sig, NULL);
-
-                struct sigaction sig_term;
-                memset(&sig_term, 0, sizeof(struct sigaction));
-                sig_term.sa_handler = sigterm_handler;
-                sig_term.sa_flags = 0;
-                sigaction(SIGTERM, &sig_term, NULL);
-
-                while (1)
-                    pause();
-                exit(0);
-            }
             else
             {
-                running = 1;
-                printf("monitor on with PID %d\n", pid);
+                
+                pid = fork();
+                if (pid < 0)
+                {
+                    perror("fork");
+                    exit(-1);
+                }
+                else if (pid == 0)
+                {
+                    struct sigaction sig;
+                    memset(&sig, 0, sizeof(struct sigaction));
+                    sig.sa_handler = sigusr1_handler;
+                    sig.sa_flags = 0;
+                    sigaction(SIGUSR1, &sig, NULL);
+
+                    struct sigaction sig_term;
+                    memset(&sig_term, 0, sizeof(struct sigaction));
+                    sig_term.sa_handler = sigterm_handler;
+                    sig_term.sa_flags = 0;
+                    sigaction(SIGTERM, &sig_term, NULL);
+
+                    while (1)
+                        pause();
+                }
+                else
+                {
+                    running = 1;
+                    printf("monitor on with PID %d\n", pid);
+                }
             }
         }
-        else if (!running)
+        else if (strcmp(input, "stop_monitor") == 0)
         {
-            printf("monitor not running\n");
+          
+                kill(pid, SIGTERM);
+                int status;
+                waitpid(pid, &status, 0);
+                running = 0;
+                printf("monitor stopped\n");
+        
         }
         else if (strcmp(input, "list_hunts") == 0)
         {
@@ -240,10 +359,11 @@ int main()
         {
             write_to_file(input);
         }
-        else if (strcmp(input, "stop_monitor") == 0)
+        else if (strncmp(input, "calculate_score", 15) == 0)
         {
-            kill(pid, SIGTERM);
+            write_to_file(input);
         }
+       
         else if (strcmp(input, "exit") == 0)
         {
             if (running)
